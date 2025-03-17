@@ -15,7 +15,7 @@ class hydrograph_BetaDist:
     def __init__(self,Vw,Qp,dt,
                  minpeakloc=0.1,
                  maxpeakloc=0.5,
-                 grad1thresh_ratio=0.01,):
+                 grad1thresh_ratio=0.01,show_betas=False):
         """
         Initiallize class with the hydrograph constraints
 
@@ -33,7 +33,7 @@ class hydrograph_BetaDist:
         self.minpeakloc=minpeakloc
         self.maxpeakloc=maxpeakloc
         self.grad1thresh_ratio=grad1thresh_ratio
-        self.generate_beta_params()
+        self.generate_beta_params(plot=show_betas)
     
     def make_points(self,a,b,numpts=1000):
         """
@@ -136,6 +136,9 @@ class hydrograph_BetaDist:
                 # Generate x and pdf values
                 x,pdf = self.make_points(params[0], params[1])
                 plt.gca().plot(x,pdf,alpha=0.2,c='k')
+            plt.xlabel('x')
+            plt.ylabel('pdf(x)')
+            plt.title('Beta distributions')
         self.valid_beta_params=valid_beta
 
     def compute_deltaVw(self,test_duration,a,b):
@@ -242,7 +245,7 @@ class hydrograph_BetaDist:
         
         self.t=t
         self.q=q
-        self.v=v
+        self.v=v*3600   # converting m^3/hour to m^3/s
         
         if plot:
             fig,ax=plt.subplots()
