@@ -13,6 +13,8 @@
 1. **Dam breach flood hydrograph** — peak discharge and time-varying outflow estimated from multiple published empirical models, with explicit uncertainty bounds
 2. **Downstream flood inundation** — spatial extent and water depth from breach hydrograph routing using LISFLOOD-FP
 
+The tool is developed in the context of Philippine large dams but is applicable to similar settings elsewhere in Southeast Asia.
+
 ---
 
 ## Quick Start
@@ -43,3 +45,7 @@ Detailed technical documentation is maintained in the [project Wiki](../../wiki)
 ## License
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE)
+
+## Disclaimer
+
+This software and its documentation are provided for preliminary assessment purposes only. Portions of the documentation were drafted with AI assistance and are pending full technical review. See [DISCLAIMER.md](DISCLAIMER.md) for full details.
