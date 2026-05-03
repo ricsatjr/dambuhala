@@ -11,9 +11,9 @@
 `dambuhala` currently addresses two hazard pathways:
 
 1. **Dam breach flood hydrograph** — peak discharge and time-varying outflow estimated from multiple published empirical models, with explicit uncertainty bounds
-2. **Downstream flood inundation** — spatial extent and water depth from breach hydrograph routing using LISFLOOD-FP
+2. **Flood routing inputs** — conditioned terrain and boundary condition files for use with standard flood routing models to estimate downstream inundation extent and depth
 
-The tool is developed in the context of Philippine large dams but is applicable to similar settings elsewhere in Southeast Asia.
+
 
 ---
 
@@ -37,7 +37,7 @@ Detailed technical documentation is maintained in the [project Wiki](../../wiki)
 - Development roadmap
 - Empirical model descriptions and references
 - Data sources and acquisition
-- LISFLOOD-FP setup
+- Flood routing model compatibility
 - Usage examples
 
 ---
