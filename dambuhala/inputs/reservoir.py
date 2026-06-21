@@ -85,6 +85,7 @@ class HAVCurve(NamedTuple):
     volume_m3: np.ndarray      # cumulative reservoir volume (m^3)
     dam_elevation_m: float     # DEM elevation at dam toe (masl)
     crest_elevation_m: float   # dam crest elevation (masl)
+    fsl_elevation_m: float     # full supply level (masl); top of HAV sweep
 
 
 # ---------------------------------------------------------------------------
@@ -356,9 +357,10 @@ def write_geojson(
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     crest = curve.crest_elevation_m
+    fsl = curve.fsl_elevation_m
     dem_masked = dem.copy()
     dem_masked[~catchment_mask] = np.nan
-    flood_mask = (dem_masked <= crest).astype(np.uint8)
+    flood_mask = (dem_masked <= fsl).astype(np.uint8)
 
     # Vectorise flood raster
     shapes = list(rasterio.features.shapes(
@@ -389,6 +391,7 @@ def write_geojson(
                 "note": "Snapped to highest flow accumulation cell within 5-pixel search window",
                 "dam_elevation_masl": round(curve.dam_elevation_m, 2),
                 "crest_elevation_masl": round(curve.crest_elevation_m, 2),
+                "fsl_elevation_masl": round(curve.fsl_elevation_m, 2),
             },
         },
     ]
@@ -397,8 +400,9 @@ def write_geojson(
             "type": "Feature",
             "geometry": mapping(reservoir_geom),
             "properties": {
-                "name": "reservoir_extent_full_level",
-                "wse_masl": round(crest, 2),
+                "name": "reservoir_extent_full_supply_level",
+                "fsl_masl": round(fsl, 2),
+                "crest_elevation_masl": round(crest, 2),
                 "area_m2": round(float(curve.area_m2[-1]), 1),
                 "volume_m3": round(float(curve.volume_m3[-1]), 1),
             },
@@ -418,6 +422,7 @@ def run(
     dam_lat: float,
     dam_lon: float,
     dam_height_m: float,
+    fsl_elevation_m: float | None = None,
     output_dir: str = "outputs",
     step_m: float = 2.0,
     buffer_deg: float = _DEFAULT_BUFFER_DEG,
@@ -436,7 +441,14 @@ def run(
     dam_lat, dam_lon : float
         Dam location (decimal degrees, WGS84).
     dam_height_m : float
-        Maximum dam height above foundation (m).
+        Maximum dam height above foundation (m). Used to derive the crest
+        elevation (dam_toe + dam_height_m), which is stored in the result
+        and the GeoJSON but does NOT control the HAV sweep upper bound.
+    fsl_elevation_m : float, optional
+        Full supply level (FSL) in metres above mean sea level. This is the
+        upper bound of the HAV sweep (i.e. the normal maximum operating water
+        surface elevation). If None, the crest elevation is used instead,
+        which gives a conservative upper envelope.
     output_dir : str
         Directory for output files.
     step_m : float
@@ -501,12 +513,31 @@ def run(
     # ------------------------------------------------------------------------
 
     crest_elev = dam_elev + dam_height_m
+
+    # Determine FSL and validate against crest
+    if fsl_elevation_m is None:
+        fsl_elev = crest_elev
+        print("[warn] fsl_elevation_m not provided; using crest elevation as FSL.")
+    else:
+        fsl_elev = float(fsl_elevation_m)
+        if fsl_elev <= dam_elev:
+            raise ValueError(
+                f"fsl_elevation_m ({fsl_elev:.1f} m) must be above the dam toe "
+                f"elevation ({dam_elev:.1f} m)."
+            )
+        if fsl_elev > crest_elev:
+            raise ValueError(
+                f"fsl_elevation_m ({fsl_elev:.1f} m) exceeds the crest elevation "
+                f"({crest_elev:.1f} m). Check inputs."
+            )
+
     cell_area = _pixel_area_m2(transform, dam_lat)
 
     print(f"\nInput dam coordinates: ({dam_lat:.6f}, {dam_lon:.6f})")
     print(f"Snapped pour point:    ({snap_lat:.6f}, {snap_lon:.6f})")
     print(f"Dam toe elevation:     {dam_elev:.1f} m (masl)  [at snapped point]")
     print(f"Dam crest elevation:   {crest_elev:.1f} m (masl)")
+    print(f"Full supply level:     {fsl_elev:.1f} m (masl)")
     print(f"Final buffer:          {current_buffer:.2f} deg")
     print(f"Catchment pixels:      {catchment_mask.sum()}  |  Cell area: {cell_area:.1f} m^2")
 
@@ -514,8 +545,8 @@ def run(
     dem_masked = dem.copy()
     dem_masked[~catchment_mask] = np.nan
 
-    wse_levels = np.arange(dam_elev, crest_elev + step_m, step_m)
-    wse_levels = wse_levels[wse_levels <= crest_elev + 1e-6]
+    wse_levels = np.arange(dam_elev, fsl_elev + step_m, step_m)
+    wse_levels = wse_levels[wse_levels <= fsl_elev + 1e-6]
 
     areas = np.zeros(len(wse_levels))
     volumes = np.zeros(len(wse_levels))
@@ -534,6 +565,7 @@ def run(
         volume_m3=volumes,
         dam_elevation_m=dam_elev,
         crest_elevation_m=crest_elev,
+        fsl_elevation_m=fsl_elev,
     )
 
     # --- Outputs -------------------------------------------------------------
@@ -545,7 +577,7 @@ def run(
                   dam_lat, dam_lon, snap_lat, snap_lon, geojson_path)
 
     print("\n--- HAV Curve Summary ---")
-    print(f"  WSE range:  {wse_levels[0]:.1f} – {wse_levels[-1]:.1f} m (masl)")
+    print(f"  WSE range:  {wse_levels[0]:.1f} – {wse_levels[-1]:.1f} m (masl)  [toe to FSL]")
     print(f"  Max area:   {areas[-1] / 1e6:.3f} km^2")
     print(f"  Max volume: {volumes[-1] / 1e6:.3f} Mm^3")
 
@@ -553,17 +585,43 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# CLI usage example
+# CLI usage examples
 # ---------------------------------------------------------------------------
 
+# Gened-1 Hydroelectric Power Project
+# Concrete gravity dam, Pudtol, Apayao, Philippines
+# Source: Gened 1 HEPP project documents
+GENED1 = dict(
+    dam_lat=18 + 5/60 + 6.10/3600,     # 18°05'06.10" N
+    dam_lon=121 + 16/60 + 42.00/3600,  # 121°16'42.00" E
+    dam_height_m=60.0,
+    output_dir="outputs/gened1",
+    step_m=2.0,
+    cache_dir=".dem_cache",
+    # Reference values for QA (not used in computation):
+    # FSL = 105.0 m (masl)
+    # Gross storage = 158.3 Mm^3
+    # Live storage  =  72.6 Mm^3
+    # Dead storage  =  85.7 Mm^3
+    # Reservoir area at FSL = 8.87 km^2
+)
+
+# Gened-2 Hydropower Project
+# RCC gravity dam, Kabugao, Apayao, Philippines
+GENED2 = dict(
+    dam_lat=18 + 3/60 + 32.4/3600,     # 18°03'32.4" N
+    dam_lon=121 + 7/60 + 40.8/3600,    # 121°07'40.8" E
+    dam_height_m=94.0,
+    output_dir="outputs/gened2",
+    step_m=2.0,
+    cache_dir=".dem_cache",
+)
+
 if __name__ == "__main__":
-    # Gened-2 Hydropower Project
-    # RCC gravity dam, Kabugao, Apayao, Philippines
-    run(
-        dam_lat=18 + 3/60 + 32.4/3600,    # 18°03'32.4" N
-        dam_lon=121 + 7/60 + 40.8/3600,   # 121°07'40.8" E
-        dam_height_m=94.0,
-        output_dir="outputs/gened2",
-        step_m=2.0,
-        cache_dir=".dem_cache",
-    )
+    import sys
+    projects = {"gened1": GENED1, "gened2": GENED2}
+    key = sys.argv[1] if len(sys.argv) > 1 else "gened1"
+    if key not in projects:
+        print(f"Unknown project '{key}'. Choose from: {list(projects)}")
+        sys.exit(1)
+    run(**projects[key])
