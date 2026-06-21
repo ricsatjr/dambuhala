@@ -463,6 +463,16 @@ def run(
         print(f"[iter {iteration}] Fetching DEM (buffer={current_buffer:.2f} deg)...")
         dem, transform, crs = fetch_dem(dam_lat, dam_lon, current_buffer, tmp_dir)
 
+        print(f"[iter {iteration}] Delineating upstream catchment...")
+        catchment_mask, snap_lon, snap_lat = _delineate_catchment(
+            dem, transform, dam_lat, dam_lon, tmp_dir
+        )
+
+        # Use the snapped channel pixel for dam toe elevation, not the raw
+        # input coordinate, which may land on a ridge or canopy in the DSM.
+        snap_row, snap_col = _rowcol(transform, snap_lon, snap_lat)
+        dam_elev = float(dem[snap_row, snap_col])
+
         if np.isnan(dam_elev):
             raise ValueError(
                 f"DEM value at snapped pour point ({snap_lat:.6f}, {snap_lon:.6f}) "
