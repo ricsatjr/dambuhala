@@ -267,12 +267,16 @@ def _delineate_catchment(
     grid = Grid.from_raster(dem_path)
     raw = grid.read_raster(dem_path)
 
-    filled = grid.fill_depressions(raw)
-    conditioned = grid.resolve_flats(filled)
-    fdir = grid.flowdir(conditioned)
+    # All nodata_out values must be typed numpy scalars to satisfy pysheds'
+    # NEP-50 safe-casting check (plain Python floats/ints/bools are rejected
+    # on NumPy >= 1.25 / Python 3.12).
+    filled = grid.fill_depressions(raw, nodata_out=np.float32(-9999.0))
+    conditioned = grid.resolve_flats(filled, nodata_out=np.float32(-9999.0))
+    # D8 flow direction output dtype is integer; nodata = 0 means "no flow".
+    fdir = grid.flowdir(conditioned, nodata_out=np.int64(0))
 
     # Snap pour point to highest-accumulation cell nearby
-    acc = grid.accumulation(fdir)
+    acc = grid.accumulation(fdir, nodata_out=np.float64(0.0))
     dam_row, dam_col = _rowcol(transform, dam_lon, dam_lat)
     # Snap within a 5-pixel search window
     r0, r1 = max(0, dam_row - 5), min(rows, dam_row + 6)
@@ -288,6 +292,7 @@ def _delineate_catchment(
     catch = grid.catchment(
         x=snap_lon, y=snap_lat,
         fdir=fdir, xytype="coordinate",
+        nodata_out=np.bool_(False),
     )
     mask = np.array(catch).astype(bool)
     return mask
