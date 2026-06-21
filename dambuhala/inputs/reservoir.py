@@ -245,10 +245,21 @@ def _delineate_catchment(
     dam_lat: float,
     dam_lon: float,
     tmp_dir: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float, float]:
     """
-    Return a boolean mask (same shape as dem) of the upstream catchment above
-    the dam location using pysheds D8 flow routing.
+    Delineate the upstream catchment above the dam location using pysheds D8
+    flow routing.
+
+    The pour point is snapped from the input dam coordinates to the
+    highest-accumulation cell within a 5-pixel search window, which anchors
+    it to the river channel as represented in the DEM.
+
+    Returns
+    -------
+    mask : np.ndarray (bool)
+        Upstream catchment mask, same shape as dem.
+    snap_lon, snap_lat : float
+        Geographic coordinates of the snapped pour point (WGS84).
     """
     # Write DEM to temp file for pysheds
     dem_path = os.path.join(tmp_dir, "dem_conditioned.tif")
@@ -295,7 +306,7 @@ def _delineate_catchment(
         nodata_out=np.bool_(False),
     )
     mask = np.array(catch).astype(bool)
-    return mask
+    return mask, snap_lon, snap_lat
 
 
 # ---------------------------------------------------------------------------
@@ -329,12 +340,15 @@ def write_geojson(
     catchment_mask: np.ndarray,
     dam_lat: float,
     dam_lon: float,
+    snap_lat: float,
+    snap_lon: float,
     path: str,
 ) -> None:
     """
-    Write GeoJSON with two features:
-      1. dam_location  – Point at (dam_lon, dam_lat)
-      2. reservoir_extent – Polygon(s) of inundated area at full reservoir level
+    Write GeoJSON with three features:
+      1. dam_location         – Point at the user-supplied dam coordinates
+      2. snapped_pour_point   – Point at the flow-accumulation-snapped channel location
+      3. reservoir_extent     – Polygon(s) of inundated area at full reservoir level
     """
     import rasterio.features
     from shapely.geometry import shape as shp_shape
@@ -364,10 +378,19 @@ def write_geojson(
             "geometry": {"type": "Point", "coordinates": [dam_lon, dam_lat]},
             "properties": {
                 "name": "dam_location",
+                "note": "User-supplied input coordinates",
+            },
+        },
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [snap_lon, snap_lat]},
+            "properties": {
+                "name": "snapped_pour_point",
+                "note": "Snapped to highest flow accumulation cell within 5-pixel search window",
                 "dam_elevation_masl": round(curve.dam_elevation_m, 2),
                 "crest_elevation_masl": round(curve.crest_elevation_m, 2),
             },
-        }
+        },
     ]
     if reservoir_geom is not None:
         features.append({
@@ -440,16 +463,12 @@ def run(
         print(f"[iter {iteration}] Fetching DEM (buffer={current_buffer:.2f} deg)...")
         dem, transform, crs = fetch_dem(dam_lat, dam_lon, current_buffer, tmp_dir)
 
-        dam_row, dam_col = _rowcol(transform, dam_lon, dam_lat)
-        dam_elev = float(dem[dam_row, dam_col])
         if np.isnan(dam_elev):
             raise ValueError(
-                f"DEM value at dam location ({dam_lat}, {dam_lon}) is NaN. "
-                "The site may be in a void area of the GLO-30 dataset."
+                f"DEM value at snapped pour point ({snap_lat:.6f}, {snap_lon:.6f}) "
+                "is NaN. The snapped location may be in a void area of the GLO-30 "
+                "dataset. Try adjusting the dam coordinates."
             )
-
-        print(f"[iter {iteration}] Delineating upstream catchment...")
-        catchment_mask = _delineate_catchment(dem, transform, dam_lat, dam_lon, tmp_dir)
 
         if not _catchment_hits_boundary(catchment_mask):
             print(f"[iter {iteration}] Catchment contained within DEM extent. Proceeding.")
@@ -474,10 +493,12 @@ def run(
     crest_elev = dam_elev + dam_height_m
     cell_area = _pixel_area_m2(transform, dam_lat)
 
-    print(f"\nDam toe elevation:   {dam_elev:.1f} m (masl)")
-    print(f"Dam crest elevation: {crest_elev:.1f} m (masl)")
-    print(f"Final buffer:        {current_buffer:.2f} deg")
-    print(f"Catchment pixels:    {catchment_mask.sum()}  |  Cell area: {cell_area:.1f} m^2")
+    print(f"\nInput dam coordinates: ({dam_lat:.6f}, {dam_lon:.6f})")
+    print(f"Snapped pour point:    ({snap_lat:.6f}, {snap_lon:.6f})")
+    print(f"Dam toe elevation:     {dam_elev:.1f} m (masl)  [at snapped point]")
+    print(f"Dam crest elevation:   {crest_elev:.1f} m (masl)")
+    print(f"Final buffer:          {current_buffer:.2f} deg")
+    print(f"Catchment pixels:      {catchment_mask.sum()}  |  Cell area: {cell_area:.1f} m^2")
 
     # --- HAV sweep -----------------------------------------------------------
     dem_masked = dem.copy()
@@ -510,7 +531,8 @@ def run(
     geojson_path = os.path.join(output_dir, "reservoir.geojson")
 
     write_csv(curve, csv_path)
-    write_geojson(curve, dem, transform, catchment_mask, dam_lat, dam_lon, geojson_path)
+    write_geojson(curve, dem, transform, catchment_mask,
+                  dam_lat, dam_lon, snap_lat, snap_lon, geojson_path)
 
     print("\n--- HAV Curve Summary ---")
     print(f"  WSE range:  {wse_levels[0]:.1f} – {wse_levels[-1]:.1f} m (masl)")
