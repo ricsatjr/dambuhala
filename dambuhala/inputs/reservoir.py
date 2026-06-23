@@ -80,12 +80,15 @@ _BOUNDARY_MARGIN_PX = 5      # pixels: catchment must stay this far from DEM edg
 
 class HAVCurve(NamedTuple):
     """Height-area-volume curve result."""
-    wse_m: np.ndarray          # water surface elevation (masl)
-    area_m2: np.ndarray        # inundated area (m^2)
-    volume_m3: np.ndarray      # cumulative reservoir volume (m^3)
-    dam_elevation_m: float     # DEM elevation at dam toe (masl)
-    crest_elevation_m: float   # dam crest elevation (masl)
-    fsl_elevation_m: float     # full supply level (masl); top of HAV sweep
+    wse_m: np.ndarray               # water surface elevation (masl)
+    area_m2: np.ndarray             # inundated area (m^2)
+    volume_m3: np.ndarray           # cumulative reservoir volume (m^3)
+    dam_elevation_m: float          # DEM elevation at snapped dam toe (masl)
+    top_elevation_m: float          # upper bound of HAV sweep (masl): FSL if provided,
+                                    # else dam_toe + dam_height
+    crest_elevation_m: float | None # dam crest elevation (masl); None if dam_height_m
+                                    # not provided
+    fsl_elevation_m: float | None   # full supply level (masl); None if not provided
 
 
 # ---------------------------------------------------------------------------
@@ -356,11 +359,10 @@ def write_geojson(
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
-    crest = curve.crest_elevation_m
-    fsl = curve.fsl_elevation_m
+    top = curve.top_elevation_m
     dem_masked = dem.copy()
     dem_masked[~catchment_mask] = np.nan
-    flood_mask = (dem_masked <= fsl).astype(np.uint8)
+    flood_mask = (dem_masked <= top).astype(np.uint8)
 
     # Vectorise flood raster
     shapes = list(rasterio.features.shapes(
@@ -374,6 +376,18 @@ def write_geojson(
     else:
         reservoir_geom = unary_union(polys)
 
+    # Snapped point properties: include only the elevation fields that are known
+    snap_props: dict = {
+        "name": "snapped_pour_point",
+        "note": "Snapped to highest flow accumulation cell within 5-pixel search window",
+        "dam_elevation_masl": round(curve.dam_elevation_m, 2),
+        "top_elevation_masl": round(top, 2),
+    }
+    if curve.crest_elevation_m is not None:
+        snap_props["crest_elevation_masl"] = round(curve.crest_elevation_m, 2)
+    if curve.fsl_elevation_m is not None:
+        snap_props["fsl_elevation_masl"] = round(curve.fsl_elevation_m, 2)
+
     features = [
         {
             "type": "Feature",
@@ -386,26 +400,24 @@ def write_geojson(
         {
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [snap_lon, snap_lat]},
-            "properties": {
-                "name": "snapped_pour_point",
-                "note": "Snapped to highest flow accumulation cell within 5-pixel search window",
-                "dam_elevation_masl": round(curve.dam_elevation_m, 2),
-                "crest_elevation_masl": round(curve.crest_elevation_m, 2),
-                "fsl_elevation_masl": round(curve.fsl_elevation_m, 2),
-            },
+            "properties": snap_props,
         },
     ]
     if reservoir_geom is not None:
+        extent_props: dict = {
+            "name": "reservoir_extent",
+            "top_elevation_masl": round(top, 2),
+            "area_m2": round(float(curve.area_m2[-1]), 1),
+            "volume_m3": round(float(curve.volume_m3[-1]), 1),
+        }
+        if curve.fsl_elevation_m is not None:
+            extent_props["fsl_masl"] = round(curve.fsl_elevation_m, 2)
+        if curve.crest_elevation_m is not None:
+            extent_props["crest_elevation_masl"] = round(curve.crest_elevation_m, 2)
         features.append({
             "type": "Feature",
             "geometry": mapping(reservoir_geom),
-            "properties": {
-                "name": "reservoir_extent_full_supply_level",
-                "fsl_masl": round(fsl, 2),
-                "crest_elevation_masl": round(crest, 2),
-                "area_m2": round(float(curve.area_m2[-1]), 1),
-                "volume_m3": round(float(curve.volume_m3[-1]), 1),
-            },
+            "properties": extent_props,
         })
 
     geojson = {"type": "FeatureCollection", "features": features}
@@ -421,10 +433,9 @@ def write_geojson(
 def run(
     dam_lat: float,
     dam_lon: float,
-    dam_height_m: float,
+    dam_height_m: float | None = None,
     fsl_elevation_m: float | None = None,
     output_dir: str = "outputs",
-    step_m: float = 2.0,
     buffer_deg: float = _DEFAULT_BUFFER_DEG,
     cache_dir: str | None = None,
 ) -> HAVCurve:
@@ -436,23 +447,27 @@ def run(
     Each expansion step adds _BUFFER_INCREMENT_DEG (~25 km) until the catchment
     no longer touches the grid boundary or _MAX_BUFFER_DEG is reached.
 
+    At least one of dam_height_m or fsl_elevation_m must be provided.
+
+    HAV sweep range (100 equally-spaced points):
+      - Lower bound: snapped dam toe elevation (masl)
+      - Upper bound: fsl_elevation_m if provided, else dam_toe + dam_height_m
+
+    If both are provided, fsl_elevation_m takes priority as the upper bound.
+
     Parameters
     ----------
     dam_lat, dam_lon : float
         Dam location (decimal degrees, WGS84).
-    dam_height_m : float
-        Maximum dam height above foundation (m). Used to derive the crest
-        elevation (dam_toe + dam_height_m), which is stored in the result
-        and the GeoJSON but does NOT control the HAV sweep upper bound.
+    dam_height_m : float, optional
+        Maximum dam height above foundation (m). Used to derive crest elevation
+        (dam_toe + dam_height_m). Required if fsl_elevation_m is not provided.
     fsl_elevation_m : float, optional
-        Full supply level (FSL) in metres above mean sea level. This is the
-        upper bound of the HAV sweep (i.e. the normal maximum operating water
-        surface elevation). If None, the crest elevation is used instead,
-        which gives a conservative upper envelope.
+        Full supply level in metres above mean sea level. When provided, used
+        as the upper bound of the HAV sweep (takes priority over dam_height_m).
+        Required if dam_height_m is not provided.
     output_dir : str
         Directory for output files.
-    step_m : float
-        WSE sweep step in metres (default 2.0).
     buffer_deg : float
         Initial DEM download radius in degrees (default 0.35).
     cache_dir : str, optional
@@ -512,44 +527,54 @@ def run(
         current_buffer = next_buffer
     # ------------------------------------------------------------------------
 
-    crest_elev = dam_elev + dam_height_m
+    # --- Input validation ----------------------------------------------------
+    if dam_height_m is None and fsl_elevation_m is None:
+        raise ValueError(
+            "At least one of dam_height_m or fsl_elevation_m must be provided."
+        )
 
-    # Determine FSL and validate against crest
-    if fsl_elevation_m is None:
-        fsl_elev = crest_elev
-        print("[warn] fsl_elevation_m not provided; using crest elevation as FSL.")
-    else:
-        fsl_elev = float(fsl_elevation_m)
-        if fsl_elev <= dam_elev:
+    # --- Elevation bounds ----------------------------------------------------
+    crest_elev = (dam_elev + float(dam_height_m)) if dam_height_m is not None else None
+    fsl_elev = float(fsl_elevation_m) if fsl_elevation_m is not None else None
+
+    # Upper bound: FSL takes priority; fall back to crest
+    if fsl_elev is not None:
+        top_elev = fsl_elev
+        if top_elev <= dam_elev:
             raise ValueError(
                 f"fsl_elevation_m ({fsl_elev:.1f} m) must be above the dam toe "
                 f"elevation ({dam_elev:.1f} m)."
             )
-        if fsl_elev > crest_elev:
+        if crest_elev is not None and fsl_elev > crest_elev:
             raise ValueError(
                 f"fsl_elevation_m ({fsl_elev:.1f} m) exceeds the crest elevation "
                 f"({crest_elev:.1f} m). Check inputs."
             )
+    else:
+        top_elev = crest_elev  # dam_height_m is guaranteed non-None here
 
     cell_area = _pixel_area_m2(transform, dam_lat)
 
     print(f"\nInput dam coordinates: ({dam_lat:.6f}, {dam_lon:.6f})")
     print(f"Snapped pour point:    ({snap_lat:.6f}, {snap_lon:.6f})")
     print(f"Dam toe elevation:     {dam_elev:.1f} m (masl)  [at snapped point]")
-    print(f"Dam crest elevation:   {crest_elev:.1f} m (masl)")
-    print(f"Full supply level:     {fsl_elev:.1f} m (masl)")
+    if crest_elev is not None:
+        print(f"Dam crest elevation:   {crest_elev:.1f} m (masl)")
+    if fsl_elev is not None:
+        print(f"Full supply level:     {fsl_elev:.1f} m (masl)")
+    print(f"HAV upper bound:       {top_elev:.1f} m (masl)  "
+          f"[{'FSL' if fsl_elev is not None else 'crest'}]")
     print(f"Final buffer:          {current_buffer:.2f} deg")
     print(f"Catchment pixels:      {catchment_mask.sum()}  |  Cell area: {cell_area:.1f} m^2")
 
-    # --- HAV sweep -----------------------------------------------------------
+    # --- HAV sweep (100 equally-spaced points, toe to top) -------------------
     dem_masked = dem.copy()
     dem_masked[~catchment_mask] = np.nan
 
-    wse_levels = np.arange(dam_elev, fsl_elev + step_m, step_m)
-    wse_levels = wse_levels[wse_levels <= fsl_elev + 1e-6]
+    wse_levels = np.linspace(dam_elev, top_elev, 100)
 
-    areas = np.zeros(len(wse_levels))
-    volumes = np.zeros(len(wse_levels))
+    areas = np.zeros(100)
+    volumes = np.zeros(100)
     prev_wse, prev_area = dam_elev, 0.0
 
     for i, wse in enumerate(wse_levels):
@@ -564,6 +589,7 @@ def run(
         area_m2=areas,
         volume_m3=volumes,
         dam_elevation_m=dam_elev,
+        top_elevation_m=top_elev,
         crest_elevation_m=crest_elev,
         fsl_elevation_m=fsl_elev,
     )
@@ -577,7 +603,7 @@ def run(
                   dam_lat, dam_lon, snap_lat, snap_lon, geojson_path)
 
     print("\n--- HAV Curve Summary ---")
-    print(f"  WSE range:  {wse_levels[0]:.1f} – {wse_levels[-1]:.1f} m (masl)  [toe to FSL]")
+    print(f"  WSE range:  {wse_levels[0]:.1f} – {wse_levels[-1]:.1f} m (masl)  [100 points]")
     print(f"  Max area:   {areas[-1] / 1e6:.3f} km^2")
     print(f"  Max volume: {volumes[-1] / 1e6:.3f} Mm^3")
 
@@ -595,11 +621,10 @@ GENED1 = dict(
     dam_lat=18 + 5/60 + 6.10/3600,     # 18°05'06.10" N
     dam_lon=121 + 16/60 + 42.00/3600,  # 121°16'42.00" E
     dam_height_m=60.0,
+    fsl_elevation_m=105.0,             # FSL = 105.0 m (masl)
     output_dir="outputs/gened1",
-    step_m=2.0,
     cache_dir=".dem_cache",
     # Reference values for QA (not used in computation):
-    # FSL = 105.0 m (masl)
     # Gross storage = 158.3 Mm^3
     # Live storage  =  72.6 Mm^3
     # Dead storage  =  85.7 Mm^3
@@ -612,8 +637,8 @@ GENED2 = dict(
     dam_lat=18 + 3/60 + 32.4/3600,     # 18°03'32.4" N
     dam_lon=121 + 7/60 + 40.8/3600,    # 121°07'40.8" E
     dam_height_m=94.0,
+    fsl_elevation_m=190.0,             # FSL = 190.0 m (masl), source: EIS
     output_dir="outputs/gened2",
-    step_m=2.0,
     cache_dir=".dem_cache",
 )
 
